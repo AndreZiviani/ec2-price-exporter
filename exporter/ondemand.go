@@ -32,7 +32,7 @@ func (e *Exporter) getOnDemandPricing(region string, scrapes chan<- scrapeResult
 			pricingSvc,
 			&pricing.GetProductsInput{
 				ServiceCode: aws.String("AmazonEC2"),
-				MaxResults:  100,
+				MaxResults:  aws.Int32(100),
 				Filters: []pricingtypes.Filter{
 					{
 						Field: aws.String("regionCode"),
