@@ -33,3 +33,8 @@ type Details struct {
 	BeginRange   string
 	PricePerUnit map[string]string
 }
+
+type Instance struct {
+	Memory int64
+	VCpu   int32
+}

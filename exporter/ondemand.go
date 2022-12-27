@@ -89,15 +89,17 @@ func (e *Exporter) getOnDemandPricing(region string, scrapes chan<- scrapeResult
 		skuOnDemand := fmt.Sprintf("%s.%s", sku, TermOnDemand)
 		skuOnDemandPerHour := fmt.Sprintf("%s.%s", skuOnDemand, TermPerHour)
 
+		value, err := strconv.ParseFloat(out.Terms.OnDemand[skuOnDemand].PriceDimensions[skuOnDemandPerHour].PricePerUnit["USD"], 64)
+		if err != nil {
+			log.WithError(err).Errorf("error while parsing spot price value from API response [region=%s, type=%s]", region, out.Product.Attributes["instanceType"])
+			atomic.AddUint64(&e.errorCount, 1)
+		}
+		log.Debugf("Creating new metric: ec2{region=%s, instance_type=%s, product_description=%s} = %v.", region, out.Product.Attributes["instanceType"], out.Product.Attributes["operatingSystem"], value)
+
+		vcpu, memory := e.getNormalizedCost(value, out.Product.Attributes["instanceType"])
 		for _, az := range azs {
-			value, err := strconv.ParseFloat(out.Terms.OnDemand[skuOnDemand].PriceDimensions[skuOnDemandPerHour].PricePerUnit["USD"], 64)
-			if err != nil {
-				log.WithError(err).Errorf("error while parsing spot price value from API response [region=%s, az=%s, type=%s]", region, az, out.Product.Attributes["instanceType"])
-				atomic.AddUint64(&e.errorCount, 1)
-			}
-			log.Debugf("Creating new metric: current_price{region=%s, az=%s, instance_type=%s, product_description=%s} = %v.", region, az, out.Product.Attributes["instanceType"], out.Product.Attributes["operatingSystem"], value)
 			scrapes <- scrapeResult{
-				Name:               "current_price",
+				Name:               "ec2",
 				Value:              value,
 				Region:             region,
 				AvailabilityZone:   az,
@@ -105,6 +107,24 @@ func (e *Exporter) getOnDemandPricing(region string, scrapes chan<- scrapeResult
 				InstanceLifecycle:  "ondemand",
 				OperatingSystem:    out.Product.Attributes["operatingSystem"],
 				ProductDescription: out.Product.Attributes["productDescription"],
+				Memory:             e.getInstanceMemory(out.Product.Attributes["instanceType"]),
+				VCpu:               e.getInstanceVCpu(out.Product.Attributes["instanceType"]),
+			}
+			scrapes <- scrapeResult{
+				Name:              "ec2_memory",
+				Value:             memory,
+				Region:            region,
+				AvailabilityZone:  az,
+				InstanceType:      out.Product.Attributes["instanceType"],
+				InstanceLifecycle: "ondemand",
+			}
+			scrapes <- scrapeResult{
+				Name:              "ec2_vcpu",
+				Value:             vcpu,
+				Region:            region,
+				AvailabilityZone:  az,
+				InstanceType:      out.Product.Attributes["instanceType"],
+				InstanceLifecycle: "ondemand",
 			}
 		}
 	}

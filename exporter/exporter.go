@@ -17,10 +17,12 @@ type Exporter struct {
 	productDescriptions []string
 	operatingSystems    []string
 	regions             []string
+	lifecycle           []string
 	duration            prometheus.Gauge
 	scrapeErrors        prometheus.Gauge
 	totalScrapes        prometheus.Counter
 	pricingMetrics      map[string]*prometheus.GaugeVec
+	instances           map[string]Instance
 	awsCfg              aws.Config
 	cache               int
 	nextScrape          time.Time
@@ -38,15 +40,18 @@ type scrapeResult struct {
 	InstanceLifecycle  string
 	ProductDescription string
 	OperatingSystem    string
+	Memory             string
+	VCpu               string
 }
 
 // NewExporter returns a new exporter of AWS EC2 Price metrics.
-func NewExporter(pds []string, oss []string, regions []string, cache int) (*Exporter, error) {
+func NewExporter(pds []string, oss []string, regions []string, lifecycle []string, cache int) (*Exporter, error) {
 
 	e := Exporter{
 		productDescriptions: pds,
 		operatingSystems:    oss,
 		regions:             regions,
+		lifecycle:           lifecycle,
 		cache:               cache,
 		nextScrape:          time.Now(),
 		duration: prometheus.NewGauge(prometheus.GaugeOpts{
@@ -66,17 +71,37 @@ func NewExporter(pds []string, oss []string, regions []string, cache int) (*Expo
 		}),
 	}
 
+	cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion("us-east-1"))
+	if err != nil {
+		log.WithError(err).Errorf("error while initializing aws config [region=%s]", "us-east-1")
+	}
+
+	e.awsCfg = cfg
+
 	e.initGauges()
+	e.getInstances()
 	return &e, nil
 }
 
 func (e *Exporter) initGauges() {
 	e.pricingMetrics = map[string]*prometheus.GaugeVec{}
-	e.pricingMetrics["current_price"] = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: "ec2",
-		Name:      "current_price",
+	e.pricingMetrics["ec2"] = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "aws_pricing",
+		Name:      "ec2",
 		Help:      "Current price of the instance type.",
-	}, []string{"instance_lifecycle", "instance_type", "region", "availability_zone", "product_description", "operating_system"})
+	}, []string{"instance_lifecycle", "instance_type", "region", "availability_zone", "product_description", "operating_system", "memory", "vcpu"})
+
+	e.pricingMetrics["ec2_memory"] = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "aws_pricing",
+		Name:      "ec2_memory",
+		Help:      "Price of each GB of memory of the instance.",
+	}, []string{"instance_lifecycle", "instance_type", "region", "availability_zone"})
+
+	e.pricingMetrics["ec2_vcpu"] = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "aws_pricing",
+		Name:      "ec2_vcpu",
+		Help:      "Price of each VCPU of the instance.",
+	}, []string{"instance_lifecycle", "instance_type", "region", "availability_zone"})
 }
 
 // Describe outputs metric descriptions.
@@ -146,8 +171,13 @@ func (e *Exporter) scrape(scrapes chan<- scrapeResult) {
 
 			e.awsCfg = cfg
 
-			e.getSpotPricing(region, scrapes)
-			e.getOnDemandPricing(region, scrapes)
+			if contains(e.lifecycle, "spot") {
+				e.getSpotPricing(region, scrapes)
+			}
+
+			if contains(e.lifecycle, "ondemand") {
+				e.getOnDemandPricing(region, scrapes)
+			}
 			return
 
 		}(region)
@@ -155,7 +185,7 @@ func (e *Exporter) scrape(scrapes chan<- scrapeResult) {
 	}
 
 	e.scrapeErrors.Set(float64(atomic.LoadUint64(&errorCount)))
-	e.duration.Set(float64(time.Now().UnixNano()-now.UnixNano()) / 1000000000)
+	e.duration.Set(float64(time.Now().UnixNano()-now.UnixNano()) / 1_000_000_000)
 }
 
 func (e *Exporter) setPricingMetrics(scrapes <-chan scrapeResult) {
@@ -164,19 +194,39 @@ func (e *Exporter) setPricingMetrics(scrapes <-chan scrapeResult) {
 		name := scr.Name
 		if _, ok := e.pricingMetrics[name]; !ok {
 			e.metricsMtx.Lock()
-			e.pricingMetrics[name] = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-				Namespace: "aws_pricing",
-				Name:      name,
-			}, []string{"instance_lifecycle", "instance_type", "region", "availability_zone", "product_description", "operating_system"})
+			//defer e.metricsMtx.Unlock()
+			if name == "ec2" {
+				e.pricingMetrics[name] = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+					Namespace: "aws_pricing",
+					Name:      name,
+				}, []string{"instance_lifecycle", "instance_type", "region", "availability_zone", "product_description", "operating_system", "memory", "vcpu"})
+			} else if name == "ec2_memory" || name == "ec2_vcpu" {
+				e.pricingMetrics[name] = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+					Namespace: "aws_pricing",
+					Name:      name,
+				}, []string{"instance_lifecycle", "instance_type", "region", "availability_zone"})
+			}
 			e.metricsMtx.Unlock()
 		}
-		var labels prometheus.Labels = map[string]string{
-			"instance_lifecycle":  scr.InstanceLifecycle,
-			"instance_type":       scr.InstanceType,
-			"region":              scr.Region,
-			"availability_zone":   scr.AvailabilityZone,
-			"product_description": scr.ProductDescription,
-			"operating_system":    scr.OperatingSystem,
+		var labels prometheus.Labels
+		if name == "ec2" {
+			labels = map[string]string{
+				"instance_lifecycle":  scr.InstanceLifecycle,
+				"instance_type":       scr.InstanceType,
+				"region":              scr.Region,
+				"availability_zone":   scr.AvailabilityZone,
+				"product_description": scr.ProductDescription,
+				"operating_system":    scr.OperatingSystem,
+				"memory":              scr.Memory,
+				"vcpu":                scr.VCpu,
+			}
+		} else if name == "ec2_memory" || name == "ec2_vcpu" {
+			labels = map[string]string{
+				"instance_lifecycle": scr.InstanceLifecycle,
+				"instance_type":      scr.InstanceType,
+				"region":             scr.Region,
+				"availability_zone":  scr.AvailabilityZone,
+			}
 		}
 		e.pricingMetrics[name].With(labels).Set(float64(scr.Value))
 	}
@@ -185,6 +235,15 @@ func (e *Exporter) setPricingMetrics(scrapes <-chan scrapeResult) {
 func (e *Exporter) inRegions(r string) bool {
 	for _, region := range e.regions {
 		if r == region {
+			return true
+		}
+	}
+	return false
+}
+
+func contains(elems []string, v string) bool {
+	for _, s := range elems {
+		if v == s {
 			return true
 		}
 	}

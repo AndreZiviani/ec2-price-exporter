@@ -32,15 +32,35 @@ func (e *Exporter) getSpotPricing(region string, scrapes chan<- scrapeResult) {
 				log.WithError(err).Errorf("error while parsing spot price value from API response [region=%s, az=%s, type=%s]", region, *price.AvailabilityZone, price.InstanceType)
 				atomic.AddUint64(&e.errorCount, 1)
 			}
-			log.Debugf("Creating new metric: current_price{region=%s, az=%s, instance_type=%s, product_description=%s} = %v.", region, *price.AvailabilityZone, price.InstanceType, price.ProductDescription, value)
+			log.Debugf("Creating new metric: ec2{region=%s, az=%s, instance_type=%s, product_description=%s} = %v.", region, *price.AvailabilityZone, price.InstanceType, price.ProductDescription, value)
 			scrapes <- scrapeResult{
-				Name:               "current_price",
+				Name:               "ec2",
 				Value:              value,
 				Region:             region,
 				AvailabilityZone:   *price.AvailabilityZone,
 				InstanceType:       string(price.InstanceType),
 				InstanceLifecycle:  "spot",
 				ProductDescription: string(price.ProductDescription),
+				Memory:             e.getInstanceMemory(string(price.InstanceType)),
+				VCpu:               e.getInstanceVCpu(string(price.InstanceType)),
+			}
+
+			vcpu, memory := e.getNormalizedCost(value, string(price.InstanceType))
+			scrapes <- scrapeResult{
+				Name:              "ec2_memory",
+				Value:             memory,
+				Region:            region,
+				AvailabilityZone:  *price.AvailabilityZone,
+				InstanceType:      string(price.InstanceType),
+				InstanceLifecycle: "spot",
+			}
+			scrapes <- scrapeResult{
+				Name:              "ec2_vcpu",
+				Value:             vcpu,
+				Region:            region,
+				AvailabilityZone:  *price.AvailabilityZone,
+				InstanceType:      string(price.InstanceType),
+				InstanceLifecycle: "spot",
 			}
 		}
 	}

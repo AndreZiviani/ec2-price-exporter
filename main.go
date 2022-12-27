@@ -38,7 +38,7 @@ func init() {
 }
 
 func main() {
-	log.Infof("Starting AWS EC2 Price exporter. [log-level=%s, product-descriptions=%s, operating-systems=%s, cache=%d]", *rawLevel, *productDescriptions, *operatingSystems, *cache)
+	log.Infof("Starting AWS EC2 Price exporter. [log-level=%s, product-descriptions=%s, operating-systems=%s, cache=%d, lifecycle=%s]", *rawLevel, *productDescriptions, *operatingSystems, *cache, *lifecycle)
 
 	var reg []string
 	if len(*regions) == 0 {
@@ -64,9 +64,13 @@ func main() {
 
 	pds := splitAndTrim(*productDescriptions)
 	oss := splitAndTrim(*operatingSystems)
+	lc := splitAndTrim(*lifecycle)
+	if len(lc) == 0 {
+		lc = []string{"spot", "ondemand"}
+	}
 	validateProductDesc(pds)
 	validateOperatingSystems(oss)
-	exporter, err := exporter.NewExporter(pds, oss, reg, *cache)
+	exporter, err := exporter.NewExporter(pds, oss, reg, lc, *cache)
 	if err != nil {
 		log.Fatal(err)
 	}
